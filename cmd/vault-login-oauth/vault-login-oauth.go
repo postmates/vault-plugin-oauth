@@ -68,8 +68,8 @@ func newLogin(pluginPath string, role string) *oidcLogin {
 
 	// Determine the authorization request URL.
 	{
-		secret, err := login.vault.Read(pluginPath + "/auth_request")
-		if err != nil {
+		secret, err := login.vault.Read(pluginPath + "/auth-request")
+		if err != nil || secret == nil || secret.Data == nil {
 			fatal("Failed to get authorization request URL:", err)
 		}
 		rawURL := secret.Data["url"].(string)

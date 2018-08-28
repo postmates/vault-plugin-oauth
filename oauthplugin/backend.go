@@ -16,7 +16,7 @@ func Factory(ctx context.Context, config *logical.BackendConfig) (logical.Backen
 			BackendType: logical.TypeCredential,
 			Help:        backendHelp,
 			PathsSpecial: &logical.Paths{
-				Unauthenticated: []string{"login", "auth_request"},
+				Unauthenticated: []string{"login", "auth-request"},
 				SealWrapStorage: []string{"config"},
 			},
 		},

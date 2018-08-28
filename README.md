@@ -59,7 +59,7 @@ Start Vault with `vault server -config=...`.
 Build the plugin:
 
     go build -o /usr/lib/vault/vault-plugin-oauth \
-		/github.com/postmates/vault-plugin-oauth/cmd/vault-plugin-oauth
+		/github.com/postmates/vault-plugin-oauth
 
 Register the plugin:
 
