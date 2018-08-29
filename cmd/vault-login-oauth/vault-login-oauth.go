@@ -24,7 +24,7 @@ type oidcLogin struct {
 	server       *http.Server
 	listener     net.Listener
 	vault        *api.Logical
-	authReqURL   string
+	authReqURL   *url.URL
 	redirectURL  string
 	stateNonce   string
 	authDone     context.CancelFunc
@@ -33,6 +33,13 @@ type oidcLogin struct {
 	role         string
 	pluginPath   string
 }
+
+const (
+	callbackSuffix = "/cb"
+	authReqSuffix  = "/auth-request"
+	// how long we'll wait for the OAuth redirect after opening a browser
+	oauthTimeout = 5 * time.Minute
+)
 
 func newLogin(pluginPath string, role string) *oidcLogin {
 	login := &oidcLogin{
@@ -46,7 +53,7 @@ func newLogin(pluginPath string, role string) *oidcLogin {
 	// incorporating the pluginPath accomplishes that.
 	//
 	// https://tools.ietf.org/html/rfc8252#section-8.10
-	callbackPath := pluginPath + "/cb"
+	callbackPath := pluginPath + callbackSuffix
 
 	// Create our vault client.
 	{
@@ -70,7 +77,7 @@ func newLogin(pluginPath string, role string) *oidcLogin {
 
 	// Determine the authorization request URL.
 	{
-		secret, err := login.vault.Read(pluginPath + "/auth-request")
+		secret, err := login.vault.Read(pluginPath + authReqSuffix)
 		if err != nil || secret == nil || secret.Data == nil {
 			fatal("Failed to get authorization request URL:", err)
 		}
@@ -86,7 +93,7 @@ func newLogin(pluginPath string, role string) *oidcLogin {
 		query.Set("redirect_uri", login.redirectURL)
 		query.Set("state", login.stateNonce)
 		parsedURL.RawQuery = query.Encode()
-		login.authReqURL = parsedURL.String()
+		login.authReqURL = parsedURL
 	}
 
 	http.HandleFunc(callbackPath, login.handleOAuthCallback)
@@ -133,7 +140,7 @@ func (login *oidcLogin) handleOAuthCallback(writer http.ResponseWriter, req *htt
 }
 
 func (login *oidcLogin) runOAuthFlow() (*api.Secret, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), oauthTimeout)
 	login.authDone = cancel
 
 	// First we start the server.
@@ -145,13 +152,12 @@ func (login *oidcLogin) runOAuthFlow() (*api.Secret, error) {
 	}()
 
 	// Then we open a browser.
-	openURL(login.authReqURL)
+	openURL(login.authReqURL.String())
 
-	// handleOAuthCallback will cancel the context, or it will time out.
-	select {
-	case <-ctx.Done():
-		login.server.Shutdown(ctx)
-	}
+	// handleOAuthCallback will cancel the context when the callback has been
+	// received, or the context will time out.
+	<-ctx.Done()
+	login.server.Shutdown(ctx)
 
 	if ctx.Err() != context.Canceled {
 		return nil, ctx.Err()
