@@ -95,7 +95,7 @@ with a role such as:
 	vault write auth/oauth/role/default - <<EOF
 	{
 		"bound_claims": {
-			"hd": "postmates.com",
+			"hd": "example.com",
 			"email_verified": true
 		}
 	}

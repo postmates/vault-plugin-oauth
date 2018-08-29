@@ -31,12 +31,14 @@ type oidcLogin struct {
 	authErr      error
 	authResponse *api.Secret
 	role         string
+	pluginPath   string
 }
 
 func newLogin(pluginPath string, role string) *oidcLogin {
 	login := &oidcLogin{
-		server: &http.Server{},
-		role:   role,
+		server:     &http.Server{},
+		role:       role,
+		pluginPath: pluginPath,
 	}
 
 	// The callback URI must be unique for each authorization server. Since
@@ -110,7 +112,7 @@ func (login *oidcLogin) handleOAuthCallback(writer http.ResponseWriter, req *htt
 		return
 	}
 
-	secret, err := login.vault.Write("/auth/oauth/login", map[string]interface{}{
+	secret, err := login.vault.Write(login.pluginPath+"/login", map[string]interface{}{
 		"code":         code,
 		"redirect_uri": login.redirectURL,
 		"role":         login.role,
