@@ -1,3 +1,16 @@
+// vault-login-oauth is the program a user runs to log in to Vault with OAuth.
+//
+// It will:
+//
+// 1. Query Vault to determine what the authorization request URL should be,
+//    according to the configuration there.
+// 2. Start a webserver listening on 127.0.0.1.
+// 3. Open a browser where the user will enter credentials.
+// 4. Receive the authorization code when the user has finished entering
+//    credentials via the HTTP server.
+// 5. Forward this authorization code to Vault.
+// 6. Save the token returned by Vault for subsequent use.
+
 package main
 
 import (
@@ -26,12 +39,17 @@ type oidcLogin struct {
 	vault        *api.Logical
 	authReqURL   *url.URL
 	redirectURL  string
-	stateNonce   string
 	authDone     context.CancelFunc
 	authErr      error
 	authResponse *api.Secret
-	role         string
-	pluginPath   string
+	callbackPath string
+
+	// role and pluginPath are specified by the user as command-line options.
+	role       string
+	pluginPath string
+
+	// stateNonce holds a random value we use to mitigate CSRF attacks.
+	stateNonce string
 }
 
 const (
@@ -46,59 +64,59 @@ func newLogin(pluginPath string, role string) *oidcLogin {
 		server:     &http.Server{},
 		role:       role,
 		pluginPath: pluginPath,
+		stateNonce: generateNonce(),
+
+		// The callback URI must be unique for each authorization server. Since
+		// each mount of the plugin corresponds to an authorization server,
+		// incorporating the pluginPath accomplishes that.
+		//
+		// https://tools.ietf.org/html/rfc8252#section-8.10
+		callbackPath: pluginPath + callbackSuffix,
 	}
 
-	// The callback URI must be unique for each authorization server. Since
-	// each mount of the plugin corresponds to an authorization server,
-	// incorporating the pluginPath accomplishes that.
-	//
-	// https://tools.ietf.org/html/rfc8252#section-8.10
-	callbackPath := pluginPath + callbackSuffix
-
-	// Create our vault client.
-	{
-		vaultClient, err := api.NewClient(nil)
-		if err != nil {
-			fatal("Couldn't create Vault client:", err)
-		}
-		login.vault = vaultClient.Logical()
-	}
-
-	// Start listening on some random localhost port, at which point we'll know
-	// what redirect_uri to give the authorization server.
-	{
-		listener, err := net.Listen("tcp", "127.0.0.1:0")
-		if err != nil {
-			fatal(err)
-		}
-		login.listener = listener
-		login.redirectURL = fmt.Sprintf("http://%s%s", login.listener.Addr(), callbackPath)
-	}
-
-	// Determine the authorization request URL.
-	{
-		secret, err := login.vault.Read(pluginPath + authReqSuffix)
-		if err != nil || secret == nil || secret.Data == nil {
-			fatal("Failed to get authorization request URL:", err)
-		}
-		rawURL := secret.Data["url"].(string)
-		parsedURL, err := url.Parse(rawURL)
-		if err != nil {
-			fatal("Failed parsing authorization request URL from Vault:", err)
-		}
-
-		login.stateNonce = generateNonce()
-
-		query := parsedURL.Query()
-		query.Set("redirect_uri", login.redirectURL)
-		query.Set("state", login.stateNonce)
-		parsedURL.RawQuery = query.Encode()
-		login.authReqURL = parsedURL
-	}
-
-	http.HandleFunc(callbackPath, login.handleOAuthCallback)
+	http.HandleFunc(login.callbackPath, login.handleOAuthCallback)
 
 	return login
+}
+
+func (login *oidcLogin) makeVaultClient() {
+	vaultClient, err := api.NewClient(nil)
+	if err != nil {
+		fatal("Couldn't create Vault client:", err)
+	}
+	login.vault = vaultClient.Logical()
+}
+
+// startListening binds to some available port on 127.0.0.1. It then determines
+// redirectURL.
+func (login *oidcLogin) startListening() {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		fatal(err)
+	}
+	login.listener = listener
+	login.redirectURL = fmt.Sprintf("http://%s%s", listener.Addr(), login.callbackPath)
+}
+
+// getAuthReqURL queries Vault for the authorization request URL, according to
+// the OAuth provider configured on the Vault server. It adds the redirect_uri
+// and state parameters, which aren't known by the Vault server.
+func (login *oidcLogin) getAuthReqURL() {
+	secret, err := login.vault.Read(login.pluginPath + authReqSuffix)
+	if err != nil || secret == nil || secret.Data == nil {
+		fatal("Failed to get authorization request URL:", err)
+	}
+	rawURL := secret.Data["url"].(string)
+	parsedURL, err := url.Parse(rawURL)
+	if err != nil {
+		fatal("Failed parsing authorization request URL from Vault:", err)
+	}
+
+	query := parsedURL.Query()
+	query.Set("redirect_uri", login.redirectURL)
+	query.Set("state", login.stateNonce)
+	parsedURL.RawQuery = query.Encode()
+	login.authReqURL = parsedURL
 }
 
 // HTTP handler for the redirect_uri. Once the user has gone through the
@@ -115,6 +133,10 @@ func (login *oidcLogin) handleOAuthCallback(writer http.ResponseWriter, req *htt
 	if state != login.stateNonce {
 		// This indicates either a CSRF attack or a buggy authorization server.
 		// We won't even dignify it with a response.
+		//
+		// https://tools.ietf.org/html/rfc6819#section-5.3.5
+		// https://tools.ietf.org/html/rfc6749#section-10.12
+		// https://tools.ietf.org/html/rfc6749#section-4.1.2
 		fatal("DANGER: POSSIBLE CSRF ATTACK DETECTED.\nReceived state", state, "expected", login.stateNonce)
 		return
 	}
@@ -176,6 +198,10 @@ func main() {
 	flagSet.Parse(os.Args[1:])
 
 	login := newLogin(*pathFlag, *roleFlag)
+	login.makeVaultClient()
+	login.startListening()
+	login.getAuthReqURL()
+
 	response, err := login.runOAuthFlow()
 	if err == context.DeadlineExceeded {
 		fatal("Timed out waiting for response")
@@ -199,7 +225,7 @@ func main() {
 	os.Exit(0)
 }
 
-// Print something to stderr and exit immediately
+// fatal prints something to stderr and exits immediately.
 func fatal(v ...interface{}) {
 	fmt.Fprintln(os.Stderr, v...)
 	os.Exit(1)
