@@ -20,6 +20,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"github.com/hashicorp/vault/command"
 	"log"
 	"net"
 	"net/http"
@@ -43,6 +44,7 @@ type oidcLogin struct {
 	authErr      error
 	authResponse *api.Secret
 	callbackPath string
+	config       *command.DefaultConfig
 
 	// role and pluginPath are specified by the user as command-line options.
 	role       string
@@ -85,6 +87,10 @@ func (login *oidcLogin) makeVaultClient() {
 		fatal("Couldn't create Vault client:", err)
 	}
 	login.vault = vaultClient.Logical()
+	login.config, err = command.Config()
+	if err != nil {
+		fatal("Failed to parse config:", err)
+	}
 }
 
 // startListening binds to some available port on 127.0.0.1. It then determines
@@ -187,6 +193,17 @@ func (login *oidcLogin) runOAuthFlow() (*api.Secret, error) {
 	return login.authResponse, login.authErr
 }
 
+func (login *oidcLogin) saveToken(clientToken string) error {
+	path, err := token.ExternalTokenHelperPath(login.config.TokenHelper)
+	var helper token.TokenHelper = nil
+	if err != nil || path == "" {
+		helper = &token.InternalTokenHelper{}
+	} else {
+		helper = &token.ExternalTokenHelper{BinaryPath: path}
+	}
+	return helper.Store(clientToken)
+}
+
 func main() {
 	// We must define our own flagSet because
 	// github.com/hashicorp/vault/command/token depends on "testing", which
@@ -217,11 +234,12 @@ func main() {
 	if clientToken == "" {
 		fatal("No token in response!")
 	}
-	tokenHelper := token.InternalTokenHelper{}
-	err = tokenHelper.Store(clientToken)
+
+	err = login.saveToken(clientToken)
 	if err != nil {
 		fatal("Failed to save token:", err)
 	}
+
 	os.Exit(0)
 }
 
